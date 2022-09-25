@@ -1,4 +1,4 @@
-import os
+ import os
 import json
 import boto3
 import uuid
@@ -9,6 +9,8 @@ from influxdb_client.client.write_api import SYNCHRONOUS
 
 
 s3_bucket = os.environ['S3_BUCKET']
+aws_region = os.environ['S3_REGION']
+model = os.environ['MODEL_ARN']
 influx_token = os.environ['INFLUXDB_TOKEN']
 influx_org = os.environ['INFLUXDB_ORG']
 influx_url = os.environ['INFLUXDB_URL']
@@ -23,14 +25,25 @@ def save_influxdb(image, label, value):
     write_api.write(bucket=influx_bucket, org=influx_org, record=point)
 
 def get_image_labels(bucket, photo):
-    client = boto3.client('rekognition')
+    client = boto3.client('rekognition', region_name=aws_region)
     response = client.detect_labels(
         Image={'S3Object': {'Bucket': bucket, 'Name': photo}},
         MaxLabels=10)
     return response
     
-def process_image(bucket, image):
-    label_response = get_image_labels(bucket, image)
+def get_custom_labels(photo):
+    client = boto3.client('rekognition', region_name=aws_region)
+    response = client.detect_custom_labels(Image={'S3Object': {'Bucket': s3_bucket, 'Name': photo}},
+                                           ProjectVersionArn=model)
+    labels = response['CustomLabels']
+    if len(labels) > 0:
+        return labels[0]['Name'], labels[0]['Confidence']
+    else:
+        generic_label = process_image(photo)
+        return generic_label['Name'], generic_label['Confidence']
+
+def process_image(image):
+    label_response = get_image_labels(s3_bucket, image)
     first_label = label_response['Labels'][0]
     return first_label
 
@@ -52,17 +65,15 @@ def lambda_handler(event, context):
     
     if 'body' in event:
         status = 200
-        file_name = str(uuid.uuid4())[:12]
+        file_name = str(uuid.uuid4())[:14]
         data = base64.b64decode(event['body'])
-        file = save_file(data, file_name, 'bin')
-        label = process_image(s3_bucket, file)
-        label_name = label['Name']
-        confidence_level = label['Confidence']
-        mp3 = gen_audio(label_name, file_name)
-        save_influxdb(file, label_name, confidence_level)
+        file = save_file(data, file_name, 'jpeg')
+        label, confidence = get_custom_labels(file)
+        mp3 = gen_audio(label, file_name)
+        save_influxdb(file, label, confidence)
         response = {
-            "label": label_name,
-            "confidence": confidence_level,
+            "label": label,
+            "confidence": confidence,
             "image_file": f'https://{s3_bucket}.s3.amazonaws.com/{file}',
             "audio_file": f'https://{s3_bucket}.s3.amazonaws.com/{mp3}'
         }
